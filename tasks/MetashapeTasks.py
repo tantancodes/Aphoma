@@ -519,7 +519,7 @@ class MetashapeTask_Reorient(MetashapeTask):
             palettedict = util.load_palettes()
             self.palette_info = palettedict[self.palette_name]
             self.axes = ModelHelpers.find_axes_from_markers(self.chunk,self.palette_info)
-        if len(self.axes)==0:
+        if not self.axes:
             code = ErrorCodes.NO_AXES
         return success, code
         
@@ -528,7 +528,7 @@ class MetashapeTask_Reorient(MetashapeTask):
         success, code = super().execute()
         if success:
             if self.chunk.model:
-                if len(self.axes)==0:
+                if not self.axes:
                     getLogger(__name__).warning("No axes on which to orient chunk %s",self.chunkname)
                 else:
                     getLogger(__name__).info("Reorienting chunk %s according to markers on palette.",self.chunkname)

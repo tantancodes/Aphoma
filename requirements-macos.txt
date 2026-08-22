@@ -1,0 +1,12 @@
+imageio
+lensfunpy
+numpy
+opencv-python
+pillow
+pytz
+rawpy
+watchdog
+pymeshlab
+requests
+inference-sdk
+Metashape @ https://download.agisoft.com/Metashape-2.2.1-cp37.cp38.cp39.cp310.cp311-abi3-macosx_11_0_universal2.macosx_10_13_x86_64.whl

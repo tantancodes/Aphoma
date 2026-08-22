@@ -9,14 +9,15 @@ class Configurator():
     _CONFIG = None
 
     def loadFrom(self,filename:Path):
-        with open(self._cfgfile,'r', encoding="utf-8") as f:
+        with open(filename,'r', encoding="utf-8") as f:
             cfg= json.load(f)["config"]
         return cfg
 
     def __init__(self):
         self._cfgfile = Path(Path(__file__).parent.parent, Path("config.json"))
         self._template = Path(Path(__file__).parent.parent, Path("config_template.json"))
-        self._config = self.loadFrom(self._cfgfile)
+        source = self._cfgfile if self._cfgfile.exists() else self._template
+        self._config = self.loadFrom(source)
 
     def setProperty(self, section, keyname, val):
         try:
@@ -32,7 +33,7 @@ class Configurator():
             getLogger(__name__).error(ke)
             return None
     def revertToTemplate(self):
-        self._cfgfile = self.loadFrom(self._template)
+        self._config = self.loadFrom(self._template)
     
     def saveConfig(self):
         with open(self._cfgfile,'w', encoding="utf-8") as f:
@@ -60,5 +61,4 @@ class Configurator():
         Configurator._CONFIG = Configurator()
         return Configurator._CONFIG
     
-
 
