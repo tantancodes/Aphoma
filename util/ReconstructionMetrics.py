@@ -15,11 +15,16 @@ from uuid import uuid4
 import Metashape
 
 from util.ExecutionProfiles import RunMode, get_execution_profile
+from util.ExperimentMetadata import resolve_experiment_metadata
 
 
 CSV_FIELDS = [
     "schema_version", "run_id", "project_name", "started_at_utc",
     "run_mode", "execution_profile_version",
+    "artifact_id", "experiment_id", "parent_reference_run_id",
+    "experiment_type", "perturbation_type", "perturbation_parameters",
+    "random_seed", "original_image_count", "images_used_count",
+    "fraction_images_retained", "manifest_path", "manifest_sha256", "notes",
     "finished_at_utc", "metashape_api_version", "input_image_count",
     "image_width_px", "image_height_px", "camera_model",
     "sparse_quality", "depth_model_quality", "depth_filter_mode",
@@ -91,7 +96,8 @@ class ReconstructionMetrics:
         "MetashapeTask_ExportModel": "export",
     }
 
-    def __init__(self, project_name, input_paths, basedir, mask_mode, config, profile=None):
+    def __init__(self, project_name, input_paths, basedir, mask_mode, config, profile=None,
+                 experiment_metadata=None):
         self.project_name = str(project_name)
         self.basedir = Path(basedir).resolve()
         self.run_id = str(uuid4())
@@ -106,6 +112,7 @@ class ReconstructionMetrics:
             Path(path).resolve() for path in input_paths
             if Path(path).is_file() and Path(path).suffix.lower() in (".jpg", ".jpeg", ".tif", ".tiff")
         ]
+        self.experiment = resolve_experiment_metadata(experiment_metadata, valid_inputs)
         mask_value = getattr(mask_mode, "value", mask_mode)
         mask_name = getattr(mask_mode, "name", str(mask_mode) if mask_mode is not None else None)
         reports_dir = self.basedir / "reports"
@@ -114,8 +121,9 @@ class ReconstructionMetrics:
         self.csv_path = self.basedir.parent / "reconstruction_summary.csv"
 
         self.report = {
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "run_id": self.run_id,
+            "experiment": self.experiment.to_dict(),
             "run": {
                 "project_name": self.project_name,
                 "run_mode": self.profile.run_mode.value,
@@ -416,10 +424,23 @@ class ReconstructionMetrics:
         mask = run["mask_mode"]
         effective = run["effective_settings"]
         pipeline = self.report["pipeline"]
+        experiment = self.report["experiment"]
         return {
             "schema_version": self.report["schema_version"], "run_id": self.run_id,
             "project_name": run["project_name"], "started_at_utc": run["started_at_utc"],
             "run_mode": run["run_mode"], "execution_profile_version": run["execution_profile_version"],
+            "artifact_id": experiment["artifact_id"], "experiment_id": experiment["experiment_id"],
+            "parent_reference_run_id": experiment["parent_reference_run_id"],
+            "experiment_type": experiment["experiment_type"],
+            "perturbation_type": experiment["perturbation_type"],
+            "perturbation_parameters": json.dumps(experiment["perturbation_parameters"], sort_keys=True)
+            if experiment["perturbation_parameters"] is not None else None,
+            "random_seed": experiment["random_seed"],
+            "original_image_count": experiment["original_image_count"],
+            "images_used_count": experiment["images_used_count"],
+            "fraction_images_retained": experiment["fraction_images_retained"],
+            "manifest_path": experiment["manifest_path"],
+            "manifest_sha256": experiment["manifest_sha256"], "notes": experiment["notes"],
             "finished_at_utc": run["finished_at_utc"], "metashape_api_version": run["metashape_api_version"],
             "input_image_count": run["input_image_count"], "image_width_px": run["image_width_px"],
             "image_height_px": run["image_height_px"], "camera_model": run["camera_model"],

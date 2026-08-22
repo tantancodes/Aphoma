@@ -21,6 +21,7 @@ from tasks import MetashapeTasks,BlenderTasks,ConversionTasks,MaskingTasks
 from util import MetashapeFileHandleSingleton
 from util.ReconstructionMetrics import ReconstructionMetrics
 from util.ExecutionProfiles import RunMode, get_execution_profile
+from util.ExperimentMetadata import ExperimentMetadata, parse_perturbation_parameters
 
 from postprocessing import MeshlabHelpers
 from util.buildManifest import Manifest
@@ -571,7 +572,8 @@ def buildModel(jobname:str,
                 tasks:Queue=None, 
                 report_statistics:bool=True,
                 cancelthreadevent:threading.Event = None,
-                run_mode=RunMode.FULL_REFERENCE):
+                run_mode=RunMode.FULL_REFERENCE,
+                experiment_metadata=None):
     """buildModel: Given a folder full of pictures, this function builds a 3D Model.
 
     Parameters:
@@ -610,7 +612,9 @@ def buildModel(jobname:str,
     tq = setupModelTasks(tq,filestouse,jobname,buildfromdir,basedir,mask_option,profile)
     if profile.run_mode == RunMode.FULL_REFERENCE:
         tq = setupPostTasks(tq,jobname,basedir,snapshot)
-    reporter = ReconstructionMetrics(jobname, filestouse, basedir, mask_option, config, profile)
+    reporter = ReconstructionMetrics(
+        jobname, filestouse, basedir, mask_option, config, profile, experiment_metadata
+    )
     try:
         executeTaskQueue(tq,True,report_statistics, cancelthreadevent, reporter)
     except Exception as exception:
@@ -638,7 +642,22 @@ def buildModelCommand(args):
     photoinput = args.photos
     outputdir = args.outputdirectory
     maskoption = int(args.maskoption)
-    buildModel(job,photoinput,outputdir, MaskingOptions(maskoption), run_mode=args.run_mode)
+    experiment_metadata = ExperimentMetadata(
+        artifact_id=args.artifact_id,
+        experiment_id=args.experiment_id,
+        parent_reference_run_id=args.parent_reference_run_id,
+        experiment_type=args.experiment_type,
+        perturbation_type=args.perturbation_type,
+        perturbation_parameters=parse_perturbation_parameters(args.perturbation_parameters),
+        random_seed=args.random_seed,
+        original_image_count=args.original_image_count,
+        manifest_path=args.manifest_path,
+        notes=args.notes,
+    )
+    buildModel(
+        job, photoinput, outputdir, MaskingOptions(maskoption),
+        run_mode=args.run_mode, experiment_metadata=experiment_metadata
+    )
     
 
 
@@ -667,6 +686,17 @@ if __name__=="__main__":
     photogrammetryparser.add_argument("--run-mode", choices=[mode.value for mode in RunMode],
                                     default=RunMode.FULL_REFERENCE.value,
                                     help="Execution profile (default: FULL_REFERENCE)")
+    photogrammetryparser.add_argument("--artifact-id")
+    photogrammetryparser.add_argument("--experiment-id")
+    photogrammetryparser.add_argument("--parent-reference-run-id")
+    photogrammetryparser.add_argument("--experiment-type")
+    photogrammetryparser.add_argument("--perturbation-type")
+    photogrammetryparser.add_argument("--perturbation-parameters", default=None,
+                                    help="JSON object describing the perturbation")
+    photogrammetryparser.add_argument("--random-seed", type=int)
+    photogrammetryparser.add_argument("--original-image-count", type=int)
+    photogrammetryparser.add_argument("--manifest-path")
+    photogrammetryparser.add_argument("--notes")
 
     photogrammetryparser.set_defaults(func=buildModelCommand)
 
