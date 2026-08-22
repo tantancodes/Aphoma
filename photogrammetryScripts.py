@@ -19,6 +19,7 @@ from processing import image_processing
 from transfer import transferscripts
 from tasks import MetashapeTasks,BlenderTasks,ConversionTasks,MaskingTasks
 from util import MetashapeFileHandleSingleton
+from util.ReconstructionMetrics import ReconstructionMetrics
 
 from postprocessing import MeshlabHelpers
 from util.buildManifest import Manifest
@@ -347,7 +348,7 @@ def buildModelFromManifest(tq:Queue,manifestfile:Path, maskmode:MaskingOptions):
         bformat = config.getProperty("processing","Build_From_Format")[1:]
         buildModel(projname,Path(project_folder,bformat),project_folder,maskmode,snapshot=True,tasks=tq)
 
-def executeTaskQueue(taskqueue:Queue,stop_on_empty:bool=True, report_statistics:bool=True, cancelthreadevent:threading.Event = None):
+def executeTaskQueue(taskqueue:Queue,stop_on_empty:bool=True, report_statistics:bool=True, cancelthreadevent:threading.Event = None, reporter=None):
     """executeTaskQueue: Given a task queue, this executes tasks until the queue is empty, running the setup, execute, and exit method on each task. 
     The function returns if an error is encountered on any of these phases. It will also return if the cancelthreadedevent threading event is set--this is set by the 
     cancel button in the UI.
@@ -369,13 +370,31 @@ def executeTaskQueue(taskqueue:Queue,stop_on_empty:bool=True, report_statistics:
     while(not FINISHED):
         if not taskqueue.empty():
             task = taskqueue.get()
-            succeeded,code = task.setup()
-            if succeeded:
-                phase = "execute"
-                succeeded, code =task.execute()
+            try:
+                if reporter:
+                    try:
+                        reporter.stage_started(task)
+                    except Exception:
+                        get_logger().exception("Failed to start reconstruction task metrics.")
+                succeeded,code = task.setup()
                 if succeeded:
-                    phase = "exit"
-                    succeeded,code = task.exit()
+                    phase = "execute"
+                    succeeded, code =task.execute()
+                    if succeeded:
+                        phase = "exit"
+                        succeeded,code = task.exit()
+                if reporter:
+                    try:
+                        reporter.stage_finished(task, succeeded, code)
+                    except Exception:
+                        get_logger().exception("Failed to finish reconstruction task metrics.")
+            except Exception as exception:
+                if reporter:
+                    try:
+                        reporter.stage_exception(task, exception)
+                    except Exception:
+                        get_logger().exception("Failed to record reconstruction task exception.")
+                raise
             if not succeeded:
                 get_logger().error("Phase %s for Task %s failed with error %s",phase, str(task),ErrorCodes.numToFriendlyString(code))
                 FINISHED=True
@@ -573,7 +592,20 @@ def buildModel(jobname:str,
         tq = tasks
     tq = setupModelTasks(tq,filestouse,jobname,buildfromdir,basedir,mask_option)
     tq = setupPostTasks(tq,jobname,basedir,snapshot)
-    executeTaskQueue(tq,True,report_statistics, cancelthreadevent)           
+    reporter = ReconstructionMetrics(jobname, filestouse, basedir, mask_option, config)
+    try:
+        executeTaskQueue(tq,True,report_statistics, cancelthreadevent, reporter)
+    except Exception as exception:
+        try:
+            reporter.record_exception(exception)
+        except Exception:
+            get_logger().exception("Failed to record reconstruction exception.")
+        raise
+    finally:
+        try:
+            reporter.finalize()
+        except Exception:
+            get_logger().exception("Failed to write reconstruction metrics report.")
 
 
     
@@ -626,4 +658,3 @@ if __name__=="__main__":
         args.func(args)
     else:
         parser.print_help()
-
