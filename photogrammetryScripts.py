@@ -21,7 +21,11 @@ from tasks import MetashapeTasks,BlenderTasks,ConversionTasks,MaskingTasks
 from util import MetashapeFileHandleSingleton
 from util.ReconstructionMetrics import ReconstructionMetrics
 from util.ExecutionProfiles import RunMode, get_execution_profile
-from util.ExperimentMetadata import ExperimentMetadata, parse_perturbation_parameters
+from util.ExperimentMetadata import (
+    ExperimentMetadata,
+    parse_perturbation_parameters,
+    resolve_manifest_inputs,
+)
 
 from postprocessing import MeshlabHelpers
 from util.buildManifest import Manifest
@@ -590,22 +594,40 @@ def buildModel(jobname:str,
     """
     config = Configurator.getConfig()
     profile = get_execution_profile(run_mode)
+    manifest_path = (
+        experiment_metadata.get("manifest_path")
+        if isinstance(experiment_metadata, dict)
+        else getattr(experiment_metadata, "manifest_path", None)
+    )
+    manifest_inputs = (
+        resolve_manifest_inputs(manifest_path, inputdir) if manifest_path else None
+    )
     
     buildfromformat = config.getProperty("processing","Build_From_Format")
     buildfromdir= Path(basedir,str(buildfromformat[1:]))
     if not tasks or tasks.empty():
         tq = Queue()
         convertfiles = []
-        for fl in os.listdir(inputdir):
-            f = Path(fl)
-            if f.suffix in config.getProperty("processing","Source_Type"):
-                convertfiles.append(f)
+        if manifest_inputs is not None:
+            convertfiles = list(manifest_inputs)
+        else:
+            for fl in os.listdir(inputdir):
+                f = Path(fl)
+                if f.suffix in config.getProperty("processing","Source_Type"):
+                    convertfiles.append(f)
         tq= setupConversionTasks(tq,
                                 convertfiles,
                                 basedir,False)
         filestouse = []
-        for images in os.listdir(inputdir):
-            filestouse.append(Path(buildfromdir,f"{Path(images).stem}{buildfromformat}"))
+        if manifest_inputs is not None:
+            for image in manifest_inputs:
+                if image.suffix.lower() == buildfromformat.lower():
+                    filestouse.append(image)
+                else:
+                    filestouse.append(Path(buildfromdir, f"{image.stem}{buildfromformat}"))
+        else:
+            for images in os.listdir(inputdir):
+                filestouse.append(Path(buildfromdir,f"{Path(images).stem}{buildfromformat}"))
         tq= setupMaskingTasks(tq,filestouse,basedir,mask_option)
     else:
         tq = tasks
