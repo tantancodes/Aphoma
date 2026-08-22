@@ -631,7 +631,8 @@ def buildModel(jobname:str,
         tq= setupMaskingTasks(tq,filestouse,basedir,mask_option)
     else:
         tq = tasks
-    tq = setupModelTasks(tq,filestouse,jobname,buildfromdir,basedir,mask_option,profile)
+    model_inputdir = manifest_inputs[0].parent if manifest_inputs else buildfromdir
+    tq = setupModelTasks(tq,filestouse,jobname,model_inputdir,basedir,mask_option,profile)
     if profile.run_mode == RunMode.FULL_REFERENCE:
         tq = setupPostTasks(tq,jobname,basedir,snapshot)
     reporter = ReconstructionMetrics(
