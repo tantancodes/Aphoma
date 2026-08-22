@@ -14,12 +14,22 @@ from uuid import uuid4
 
 import Metashape
 
+from util.ExecutionProfiles import RunMode, get_execution_profile
+
 
 CSV_FIELDS = [
     "schema_version", "run_id", "project_name", "started_at_utc",
+    "run_mode", "execution_profile_version",
     "finished_at_utc", "metashape_api_version", "input_image_count",
     "image_width_px", "image_height_px", "camera_model",
     "sparse_quality", "depth_model_quality", "depth_filter_mode",
+    "effective_sparse_downscale", "effective_depth_downscale",
+    "effective_depth_filter_mode", "effective_mesh_face_count_mode",
+    "effective_mesh_face_count_custom", "effective_build_model",
+    "effective_reorient_model", "effective_build_uv", "effective_build_texture",
+    "effective_texture_size", "effective_texture_count", "effective_export_model",
+    "effective_export_format", "planned_stages", "completed_stages", "skipped_stages",
+    "stage_states",
     "mask_mode_value", "mask_mode_name", "palette", "total_cameras",
     "aligned_cameras", "unaligned_cameras", "alignment_fraction",
     "tie_point_count", "valid_tie_point_count", "projection_record_count",
@@ -70,7 +80,18 @@ def _error_value(code):
 class ReconstructionMetrics:
     """Collects metrics without invoking or changing photogrammetry operations."""
 
-    def __init__(self, project_name, input_paths, basedir, mask_mode, config):
+    TASK_STAGES = {
+        "MetashapeTask_AlignPhotos": "alignment",
+        "MetashapeTask_ErrorReduction": "error_reduction",
+        "MetashapeTask_DetectMarkers": "marker_detection",
+        "MetashapeTask_AddScales": "scale_creation",
+        "MetashapeTask_BuildModel": "dense_model",
+        "MetashapeTask_Reorient": "reorientation",
+        "MetashapeTask_BuildTextures": "uv_texture",
+        "MetashapeTask_ExportModel": "export",
+    }
+
+    def __init__(self, project_name, input_paths, basedir, mask_mode, config, profile=None):
         self.project_name = str(project_name)
         self.basedir = Path(basedir).resolve()
         self.run_id = str(uuid4())
@@ -79,6 +100,7 @@ class ReconstructionMetrics:
         self._stage_starts = {}
         self._stage_durations = {}
         self._failed = False
+        self.profile = get_execution_profile(profile)
 
         valid_inputs = [
             Path(path).resolve() for path in input_paths
@@ -92,10 +114,13 @@ class ReconstructionMetrics:
         self.csv_path = self.basedir.parent / "reconstruction_summary.csv"
 
         self.report = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "run_id": self.run_id,
             "run": {
                 "project_name": self.project_name,
+                "run_mode": self.profile.run_mode.value,
+                "execution_profile_version": self.profile.version,
+                "effective_settings": self.profile.effective_settings(),
                 "started_at_utc": _iso_utc(self.started_at),
                 "finished_at_utc": None,
                 "metashape_api_version": Metashape.app.version,
@@ -103,11 +128,20 @@ class ReconstructionMetrics:
                 "image_width_px": None,
                 "image_height_px": None,
                 "camera_model": None,
-                "sparse_quality": config.getProperty("photogrammetry", "sparse_cloud_quality"),
-                "depth_model_quality": config.getProperty("photogrammetry", "model_quality"),
-                "depth_filter_mode": "Mild",
+                "sparse_quality": self.profile.sparse_downscale,
+                "depth_model_quality": self.profile.depth_downscale,
+                "depth_filter_mode": self.profile.depth_filter_mode,
                 "mask_mode": {"value": mask_value, "name": mask_name},
                 "palette": config.getProperty("photogrammetry", "palette"),
+            },
+            "pipeline": {
+                "planned_stages": self.profile.planned_stages,
+                "completed_stages": [],
+                "skipped_stages": self.profile.skipped_stages,
+                "stage_states": {
+                    stage: ("skipped" if stage in self.profile.skipped_stages else "not_reached")
+                    for stage in self.TASK_STAGES.values()
+                },
             },
             "alignment": {
                 "snapshot_stage": None,
@@ -132,9 +166,9 @@ class ReconstructionMetrics:
                 "texture_count": None,
                 "texture_width_px": None,
                 "texture_height_px": None,
-                "model_succeeded": False,
-                "texture_succeeded": False,
-                "export_succeeded": False,
+                "model_succeeded": None,
+                "texture_succeeded": None,
+                "export_succeeded": None,
             },
             "timing_seconds": {
                 "photo_matching": None,
@@ -175,6 +209,12 @@ class ReconstructionMetrics:
             }
 
         class_name = type(task).__name__
+        stage = self.TASK_STAGES.get(class_name)
+        if stage:
+            state = "succeeded" if bool(success) else "failed"
+            self.report["pipeline"]["stage_states"][stage] = state
+            if bool(success) and stage not in self.report["pipeline"]["completed_stages"]:
+                self.report["pipeline"]["completed_stages"].append(stage)
         if class_name == "MetashapeTask_AlignPhotos":
             self._collect_alignment(task.chunk, "post_alignment_pre_error_reduction")
         elif class_name == "MetashapeTask_ErrorReduction":
@@ -198,6 +238,9 @@ class ReconstructionMetrics:
         if start is not None:
             self._stage_durations[type(task).__name__] = time.perf_counter() - start
         self._failed = True
+        stage = self.TASK_STAGES.get(type(task).__name__)
+        if stage:
+            self.report["pipeline"]["stage_states"][stage] = "failed"
         self.report["output_status"]["error"] = {
             "code": None,
             "exception_type": type(exception).__name__,
@@ -314,11 +357,13 @@ class ReconstructionMetrics:
         finished_at = _utc_now()
         self.report["run"]["finished_at_utc"] = _iso_utc(finished_at)
         self.report["timing_seconds"]["total_runtime"] = time.perf_counter() - self.started_monotonic
-        dense = self.report["dense_model"]
-        success = (
-            not self._failed and dense["model_succeeded"]
-            and dense["texture_succeeded"] and dense["export_succeeded"]
-        )
+        stage_states = self.report["pipeline"]["stage_states"]
+        required_stages = {
+            RunMode.SFM_ONLY: ("alignment", "error_reduction"),
+            RunMode.FAST_DENSE: ("alignment", "error_reduction", "dense_model"),
+            RunMode.FULL_REFERENCE: ("alignment", "error_reduction", "dense_model", "uv_texture", "export"),
+        }[self.profile.run_mode]
+        success = not self._failed and all(stage_states[stage] == "succeeded" for stage in required_stages)
         self.report["output_status"]["success"] = success
         if success:
             self.report["output_status"]["error"] = None
@@ -335,12 +380,30 @@ class ReconstructionMetrics:
     def _append_csv(self):
         row = self._csv_row()
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_csv_header_if_needed()
         needs_header = not self.csv_path.exists() or self.csv_path.stat().st_size == 0
         with self.csv_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
             if needs_header:
                 writer.writeheader()
             writer.writerow(row)
+
+    def _migrate_csv_header_if_needed(self):
+        """Extend an existing v1 CSV without discarding its previously collected rows."""
+        if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
+            return
+        with self.csv_path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames == CSV_FIELDS:
+                return
+            rows = list(reader)
+        temporary_path = self.csv_path.with_suffix(".csv.tmp")
+        with temporary_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            for existing_row in rows:
+                writer.writerow({field: existing_row.get(field) for field in CSV_FIELDS})
+        os.replace(temporary_path, self.csv_path)
 
     def _csv_row(self):
         run = self.report["run"]
@@ -351,14 +414,34 @@ class ReconstructionMetrics:
         status = self.report["output_status"]
         error = status["error"] or {}
         mask = run["mask_mode"]
+        effective = run["effective_settings"]
+        pipeline = self.report["pipeline"]
         return {
             "schema_version": self.report["schema_version"], "run_id": self.run_id,
             "project_name": run["project_name"], "started_at_utc": run["started_at_utc"],
+            "run_mode": run["run_mode"], "execution_profile_version": run["execution_profile_version"],
             "finished_at_utc": run["finished_at_utc"], "metashape_api_version": run["metashape_api_version"],
             "input_image_count": run["input_image_count"], "image_width_px": run["image_width_px"],
             "image_height_px": run["image_height_px"], "camera_model": run["camera_model"],
             "sparse_quality": run["sparse_quality"], "depth_model_quality": run["depth_model_quality"],
             "depth_filter_mode": run["depth_filter_mode"], "mask_mode_value": mask["value"],
+            "effective_sparse_downscale": effective["sparse_downscale"],
+            "effective_depth_downscale": effective["depth_downscale"],
+            "effective_depth_filter_mode": effective["depth_filter_mode"],
+            "effective_mesh_face_count_mode": effective["mesh_face_count_mode"],
+            "effective_mesh_face_count_custom": effective["mesh_face_count_custom"],
+            "effective_build_model": effective["build_model"],
+            "effective_reorient_model": effective["reorient_model"],
+            "effective_build_uv": effective["build_uv"],
+            "effective_build_texture": effective["build_texture"],
+            "effective_texture_size": effective["texture_size"],
+            "effective_texture_count": effective["texture_count"],
+            "effective_export_model": effective["export_model"],
+            "effective_export_format": effective["export_format"],
+            "planned_stages": "|".join(pipeline["planned_stages"]),
+            "completed_stages": "|".join(pipeline["completed_stages"]),
+            "skipped_stages": "|".join(pipeline["skipped_stages"]),
+            "stage_states": json.dumps(pipeline["stage_states"], sort_keys=True),
             "mask_mode_name": mask["name"], "palette": run["palette"],
             "total_cameras": alignment["total_cameras"], "aligned_cameras": alignment["aligned_cameras"],
             "unaligned_cameras": alignment["unaligned_cameras"], "alignment_fraction": alignment["alignment_fraction"],

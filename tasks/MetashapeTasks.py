@@ -55,6 +55,7 @@ class MetashapeTask_AlignPhotos(MetashapeTask):
         self.chunk = None
         self.maskpath = argdict["maskpath"]
         self.photos = argdict["photos"] if "photos" in argdict.keys() else []
+        self.sparse_downscale = argdict.get("sparse_downscale")
 
     def __repr__(self):
         return "Metashape Task: Align Photos"
@@ -129,7 +130,9 @@ class MetashapeTask_AlignPhotos(MetashapeTask):
         success, code = super().execute()
         if success:
             
-            downscale_factor = Configurator.getConfig().getProperty("photogrammetry","sparse_cloud_quality")
+            downscale_factor = self.sparse_downscale
+            if downscale_factor is None:
+                downscale_factor = Configurator.getConfig().getProperty("photogrammetry","sparse_cloud_quality")
             if len(self.chunk.cameras)==0:
                 self.loadPhotos()
                 if self.usemasks != False:
@@ -392,6 +395,13 @@ class MetashapeTask_BuildModel(MetashapeTask):
         For it to run successfully, it the chunk it is operating on must have tie points but no model.
 
     """
+    def __init__(self, argdict:dict):
+        super().__init__(argdict)
+        self.depth_downscale = argdict.get("depth_downscale")
+        self.depth_filter_mode = argdict.get("depth_filter_mode")
+        self.mesh_face_count_mode = argdict.get("mesh_face_count_mode")
+        self.mesh_face_count_custom = argdict.get("mesh_face_count_custom")
+
     def __repr__(self):
         return "Metashape Task: Build Model from Depth Maps"
     
@@ -408,12 +418,18 @@ class MetashapeTask_BuildModel(MetashapeTask):
         success, code = super().execute()
         if success:                  
             if not self.chunk.model:
-                facecount = None or Configurator.getConfig().getProperty("photogrammetry","custom_face_count")
-                dmquality = Configurator.getConfig().getProperty("photogrammetry","model_quality")
+                facecount = self.mesh_face_count_custom
+                if facecount is None and self.mesh_face_count_mode is None:
+                    facecount = Configurator.getConfig().getProperty("photogrammetry","custom_face_count")
+                dmquality = self.depth_downscale
+                if dmquality is None:
+                    dmquality = Configurator.getConfig().getProperty("photogrammetry","model_quality")
                 targetfacecount = facecount or 200000
                 facecountconst = Metashape.FaceCount.CustomFaceCount if facecount else Metashape.FaceCount.HighFaceCount
+                filter_modes = {"Mild": Metashape.FilterMode.MildFiltering}
+                filter_mode = filter_modes.get(self.depth_filter_mode, Metashape.FilterMode.MildFiltering)
                 getLogger(__name__).info("Building Depth Maps.")
-                self.chunk.buildDepthMaps(downscale=dmquality, filter_mode = Metashape.FilterMode.MildFiltering)
+                self.chunk.buildDepthMaps(downscale=dmquality, filter_mode=filter_mode)
                 getLogger(__name__).info("Building Model.")
                 self.chunk.buildModel(source_data = Metashape.DataSource.DepthMapsData, 
                                         face_count = facecountconst,
@@ -451,6 +467,11 @@ class MetashapeTask_BuildTextures(MetashapeTask):
 
     """
 
+    def __init__(self, argdict:dict):
+        super().__init__(argdict)
+        self.texture_size = argdict.get("texture_size")
+        self.texture_count = argdict.get("texture_count")
+
     def __repr__(self):
         return "Metashape Task: Build UV Maps and Textures"
     
@@ -467,8 +488,12 @@ class MetashapeTask_BuildTextures(MetashapeTask):
         success, code = super().execute()
         if success:     
             if not len(self.chunk.model.textures)>0:
-                pages = Configurator.getConfig().getProperty("photogrammetry","texture_count")
-                tsize = Configurator.getConfig().getProperty("photogrammetry","texture_size")
+                pages = self.texture_count
+                if pages is None:
+                    pages = Configurator.getConfig().getProperty("photogrammetry","texture_count")
+                tsize = self.texture_size
+                if tsize is None:
+                    tsize = Configurator.getConfig().getProperty("photogrammetry","texture_size")
                 getLogger(__name__).info("Building UV Map and Texture for chunk %s",self.chunk.label)
                 self.chunk.buildUV(page_count=pages, texture_size=tsize)
                 self.chunk.buildTexture(texture_size=tsize, ghosting_filter=True)

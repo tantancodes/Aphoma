@@ -20,6 +20,7 @@ from transfer import transferscripts
 from tasks import MetashapeTasks,BlenderTasks,ConversionTasks,MaskingTasks
 from util import MetashapeFileHandleSingleton
 from util.ReconstructionMetrics import ReconstructionMetrics
+from util.ExecutionProfiles import RunMode, get_execution_profile
 
 from postprocessing import MeshlabHelpers
 from util.buildManifest import Manifest
@@ -509,7 +510,8 @@ def setupPostTasks(task_queue:Queue,jobname:str,basedir:Path, snapshot:bool = Tr
         task_queue.put(BlenderTasks.BlenderSnapshotTask({"inputobj":objfullname,"output":outputpath,"scale":True}))
     return task_queue
 
-def setupModelTasks(task_queue:Queue,pathlist:list,jobname:str,inputdir:Path,basedir:Path,mask_option=MaskingOptions.NOMASKS)->Queue:
+def setupModelTasks(task_queue:Queue,pathlist:list,jobname:str,inputdir:Path,basedir:Path,
+                    mask_option=MaskingOptions.NOMASKS, profile=None)->Queue:
     """setupModelTasks: Given a queue,add tasks neede to build a model to that queue.
 
     Parameters:
@@ -527,7 +529,8 @@ def setupModelTasks(task_queue:Queue,pathlist:list,jobname:str,inputdir:Path,bas
      
     config = Configurator.getConfig()
     maskpath = Path(basedir,config.getProperty("photogrammetry","mask_path"))
-    outputextn = config.getProperty("photogrammetry","export_as")
+    profile = get_execution_profile(profile)
+    outputextn = profile.export_format or config.getProperty("photogrammetry","export_as")
     paramsfortasks = {"input":inputdir,
                         "output":basedir,
                         "usemasks":mask_option != MaskingOptions.NOMASKS,
@@ -536,16 +539,28 @@ def setupModelTasks(task_queue:Queue,pathlist:list,jobname:str,inputdir:Path,bas
                         "chunkname":jobname,
                         "photos":pathlist,
                         "extension":outputextn,
+                        "sparse_downscale":profile.sparse_downscale,
+                        "depth_downscale":profile.depth_downscale,
+                        "depth_filter_mode":profile.depth_filter_mode,
+                        "mesh_face_count_mode":profile.mesh_face_count_mode,
+                        "mesh_face_count_custom":profile.mesh_face_count_custom,
+                        "texture_size":profile.texture_size,
+                        "texture_count":profile.texture_count,
                         "conform_to_shape": False
                         }
     task_queue.put(MetashapeTasks.MetashapeTask_AlignPhotos(paramsfortasks))
     task_queue.put(MetashapeTasks.MetashapeTask_ErrorReduction(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_DetectMarkers(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_AddScales(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_BuildModel(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_Reorient(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_BuildTextures(paramsfortasks))
-    task_queue.put(MetashapeTasks.MetashapeTask_ExportModel(paramsfortasks))
+    if profile.marker_and_scale:
+        task_queue.put(MetashapeTasks.MetashapeTask_DetectMarkers(paramsfortasks))
+        task_queue.put(MetashapeTasks.MetashapeTask_AddScales(paramsfortasks))
+    if profile.build_model:
+        task_queue.put(MetashapeTasks.MetashapeTask_BuildModel(paramsfortasks))
+    if profile.reorient_model:
+        task_queue.put(MetashapeTasks.MetashapeTask_Reorient(paramsfortasks))
+    if profile.build_uv or profile.build_texture:
+        task_queue.put(MetashapeTasks.MetashapeTask_BuildTextures(paramsfortasks))
+    if profile.export_model:
+        task_queue.put(MetashapeTasks.MetashapeTask_ExportModel(paramsfortasks))
     return task_queue
 
 def buildModel(jobname:str,
@@ -555,7 +570,8 @@ def buildModel(jobname:str,
                 snapshot:bool=False,
                 tasks:Queue=None, 
                 report_statistics:bool=True,
-                cancelthreadevent:threading.Event = None):
+                cancelthreadevent:threading.Event = None,
+                run_mode=RunMode.FULL_REFERENCE):
     """buildModel: Given a folder full of pictures, this function builds a 3D Model.
 
     Parameters:
@@ -571,6 +587,7 @@ def buildModel(jobname:str,
     canceltreadedevent: an event to signal to all threads launched here that the job has been cancelled. Sent from the UI and hooked up to the cancel button.
     """
     config = Configurator.getConfig()
+    profile = get_execution_profile(run_mode)
     
     buildfromformat = config.getProperty("processing","Build_From_Format")
     buildfromdir= Path(basedir,str(buildfromformat[1:]))
@@ -590,9 +607,10 @@ def buildModel(jobname:str,
         tq= setupMaskingTasks(tq,filestouse,basedir,mask_option)
     else:
         tq = tasks
-    tq = setupModelTasks(tq,filestouse,jobname,buildfromdir,basedir,mask_option)
-    tq = setupPostTasks(tq,jobname,basedir,snapshot)
-    reporter = ReconstructionMetrics(jobname, filestouse, basedir, mask_option, config)
+    tq = setupModelTasks(tq,filestouse,jobname,buildfromdir,basedir,mask_option,profile)
+    if profile.run_mode == RunMode.FULL_REFERENCE:
+        tq = setupPostTasks(tq,jobname,basedir,snapshot)
+    reporter = ReconstructionMetrics(jobname, filestouse, basedir, mask_option, config, profile)
     try:
         executeTaskQueue(tq,True,report_statistics, cancelthreadevent, reporter)
     except Exception as exception:
@@ -620,7 +638,7 @@ def buildModelCommand(args):
     photoinput = args.photos
     outputdir = args.outputdirectory
     maskoption = int(args.maskoption)
-    buildModel(job,photoinput,outputdir, MaskingOptions(maskoption))
+    buildModel(job,photoinput,outputdir, MaskingOptions(maskoption), run_mode=args.run_mode)
     
 
 
@@ -646,6 +664,9 @@ if __name__=="__main__":
                                     2 = Grayscale Thresholding, \
                                     3 = AI Inference Engine", 
                                     default=0)
+    photogrammetryparser.add_argument("--run-mode", choices=[mode.value for mode in RunMode],
+                                    default=RunMode.FULL_REFERENCE.value,
+                                    help="Execution profile (default: FULL_REFERENCE)")
 
     photogrammetryparser.set_defaults(func=buildModelCommand)
 
